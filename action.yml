@@ -48,7 +48,7 @@ runs:
       run: |
         deployFlags=(
             --manifest manifest/package.xml
-            --wait SFDX_AUTH_URL
+            --wait ${{ inputs.WAIT }}
             --test-level ${{ inputs.TEST_LEVEL }}
             --verbose
           )
