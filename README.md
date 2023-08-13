@@ -1,6 +1,6 @@
 # Salesforce Deployment GitHub Actions
 
-Build the `package.xml` and deploy to Salesforce using this GitHub Action
+Use this action to build the `package.xml` and deploy to a specified Salesforce environment.
 
 ## Inputs
 
