@@ -49,7 +49,7 @@ runs:
         deployFlags=(
             --manifest manifest/package.xml
             --wait SFDX_AUTH_URL
-            --test-level ${{ inputs.SOURCE_DIRECTORY }}
+            --test-level ${{ inputs.TEST_LEVEL }}
             --verbose
           )
         if [ "${{ inputs.DRY_RUN }}" = "true" ]; then

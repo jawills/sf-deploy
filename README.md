@@ -32,6 +32,14 @@ required: true
 ```
 ## Getting the SFDX Auth URL
 
+To get the `SFDX_AUTH_URL`, enter the following command in your terminal:
+
+```bash
+sf org display --verbose --json -o <MY_TARGET_ORG_ALIAS>
+```
+ 
+Copy down the value of `sfdxAuthUrl` for later.
+
 
 ## Usage
 
