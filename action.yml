@@ -17,6 +17,7 @@ inputs:
       - RunSpecifiedTests
       - RunLocalTests
       - RunAllTestsInOrg
+      - RunRelevantTests
   WAIT:
     description: "Number of minutes to wait for command to complete and display results."
     type: number
@@ -25,10 +26,36 @@ inputs:
     description: "Path to the local source files to deploy."
     type: string
     default: force-app
+  MANIFEST_PATH:
+    description: "If set, deploy this manifest instead of generating one from SOURCE_DIRECTORY."
+    type: string
+  POST_DESTRUCTIVE_CHANGES:
+    description: "If set, passed to sf project deploy start as --post-destructive-changes."
+    type: string
   SFDX_AUTH_URL:
     description: "The auth url tied to your deployment environment"
     type: string
     required: true
+  DEPLOYMENT_ID:
+    description: "The deployment id from a validation/ dry run."
+    type: string
+
+outputs:
+  deployment_id:
+    description: "Salesforce deployment job id."
+    value: ${{ steps.deploy_resume.outputs.deployment_id }}
+  deploy_status:
+    description: "Deployment status reported by the CLI (e.g. Succeeded, Failed)."
+    value: ${{ steps.deploy_resume.outputs.deploy_status }}
+  tests_run:
+    description: "Number of Apex tests run during deploy (empty if not present)."
+    value: ${{ steps.deploy_resume.outputs.tests_run }}
+  tests_failed:
+    description: "Number of Apex test failures (empty if not present)."
+    value: ${{ steps.deploy_resume.outputs.tests_failed }}
+  apex_org_wide_coverage_percent:
+    description: "Approximate org-wide line coverage percent from deploy codeCoverage rows (empty if not available)."
+    value: ${{ steps.deploy_resume.outputs.apex_org_wide_coverage_percent }}
 
 runs:
   using: "composite"
@@ -43,19 +70,170 @@ runs:
       run: |
         sf org login sfdx-url --set-default --sfdx-url-file <(echo "${{ inputs.SFDX_AUTH_URL }}")
     - name: Generate package.xml
+      if: ${{ inputs.MANIFEST_PATH == '' }}
       shell: bash
       run: |
-        sf project generate manifest --source-dir ${{ inputs.SOURCE_DIRECTORY }} --output-dir manifest       
-    - name: Deploy to Environment
+        sf project generate manifest --source-dir ${{ inputs.SOURCE_DIRECTORY }} --output-dir manifest
+    - name: Start deployment
       shell: bash
       run: |
+        if [ -n "${{ inputs.MANIFEST_PATH }}" ]; then
+          manifest="${{ inputs.MANIFEST_PATH }}"
+        else
+          manifest="manifest/package.xml"
+        fi
         deployFlags=(
-            --manifest manifest/package.xml
-            --wait ${{ inputs.WAIT }}
+            --manifest "$manifest"
             --test-level ${{ inputs.TEST_LEVEL }}
             --verbose
+            --async
+            --json
           )
         if [ "${{ inputs.DRY_RUN }}" = "true" ]; then
           deployFlags+=( --dry-run )
         fi
-        sf project deploy start "${deployFlags[@]}"
+        if [ -n "${{ inputs.DEPLOYMENT_ID }}" ]; then
+          deployFlags+=( --job-id ${{ inputs.DEPLOYMENT_ID }} )
+        fi
+        if [ -n "${{ inputs.POST_DESTRUCTIVE_CHANGES }}" ]; then
+          deployFlags+=( --post-destructive-changes "${{ inputs.POST_DESTRUCTIVE_CHANGES }}" )
+        fi
+        sf project deploy start "${deployFlags[@]}" > run.json
+        jq -r '.result.id' run.json > deployment-id.txt
+    - name: Resume Deployment
+      id: deploy_resume
+      shell: bash
+      run: |
+        set +e
+        sf project deploy resume -i "$(cat deployment-id.txt)" --wait ${{ inputs.WAIT }} --json > resume-result.json
+        resume_rc=$?
+        set -e
+
+        deployment_id="$(jq -r '.result.id // empty' resume-result.json 2>/dev/null || true)"
+        if [ -z "$deployment_id" ]; then
+          deployment_id="$(cat deployment-id.txt)"
+        fi
+        deploy_status="$(jq -r '.result.status // empty' resume-result.json 2>/dev/null || true)"
+        if [ -z "$deploy_status" ]; then
+          deploy_status="$(jq -r '.status // "Unknown"' resume-result.json 2>/dev/null || true)"
+        fi
+        num_deployed="$(jq -r '.result.numberComponentsDeployed // empty' resume-result.json 2>/dev/null || true)"
+        num_failed="$(jq -r '.result.numberComponentErrors // empty' resume-result.json 2>/dev/null || true)"
+        check_only="$(jq -r '.result.checkOnly // false' resume-result.json 2>/dev/null || true)"
+
+        rt='(.result.details.runTestResult // .result.runTestResult // empty)'
+
+        tests_run="$(jq -r "${rt} | if type == \"object\" then (.numTestsRun // empty | tostring) else empty end" resume-result.json 2>/dev/null || true)"
+        tests_failed="$(jq -r "${rt} | if type == \"object\" then (.numFailures // empty | tostring) else empty end" resume-result.json 2>/dev/null || true)"
+
+        apex_org_wide_coverage_percent="$(jq -r '
+          def n(v): (v // 0) | if type == "string" then tonumber else . end;
+          (.result.details.runTestResult // .result.runTestResult) as $rt |
+          if ($rt | type) != "object" then empty
+          else
+            ($rt.codeCoverage // empty) as $cc |
+            (if ($cc | type) == "array" then $cc elif $cc == null then [] else [$cc] end) as $rows |
+            if ($rows | length) == 0 then empty
+            else
+              ($rows | map(n(.numLocations)) | add // 0) as $tot |
+              ($rows | map(n(.numLocations) - n(.numLocationsNotCovered)) | add // 0) as $hit |
+              if ($tot | type) == "number" and $tot > 0 then (($hit / $tot * 10000 | round) / 100 | tostring) else empty end
+            end
+          end
+        ' resume-result.json 2>/dev/null || true)"
+
+        {
+          echo "## Deployment summary"
+          echo ""
+          echo "| Field | Value |"
+          echo "| --- | --- |"
+          echo "| Deployment ID | \`$deployment_id\` |"
+          echo "| Status | **$deploy_status** |"
+          [ -n "$num_deployed" ] && echo "| Components deployed | $num_deployed |"
+          [ -n "$num_failed" ] && echo "| Component errors | $num_failed |"
+          echo "| Check only (validate) | $check_only |"
+          [ -n "$tests_run" ] && echo "| Apex tests run | $tests_run |"
+          [ -n "$tests_failed" ] && echo "| Apex test failures | $tests_failed |"
+          [ -n "$apex_org_wide_coverage_percent" ] && echo "| Apex coverage (approx. org-wide) | ${apex_org_wide_coverage_percent}% |"
+        } >> "$GITHUB_STEP_SUMMARY"
+
+        components_total="$(jq -r '
+          def arr(x): if x == null then [] elif (x | type) == "array" then x elif x == {} then [] else [x] end;
+          (.result.details // {}) as $d |
+          (arr($d.componentSuccesses) | length) + (arr($d.componentFailures) | length)
+        ' resume-result.json 2>/dev/null)"
+        components_total="${components_total:-0}"
+
+        component_rows="$(jq -r '
+          def arr(x): if x == null then [] elif (x | type) == "array" then x elif x == {} then [] else [x] end;
+          def truthy(v): v == true or v == "true";
+          def mod(m):
+            if truthy(m.deleted) then "deleted"
+            elif truthy(m.created) then "created"
+            elif truthy(m.changed) then "change"
+            else "unchanged"
+            end;
+          (.result.details // {}) as $d |
+          (arr($d.componentSuccesses)) as $succ |
+          (arr($d.componentFailures)) as $fail |
+          (($succ | map({name: .fullName, type: .componentType, mod: mod(.)}))
+            + ($fail | map({name: .fullName, type: .componentType, mod: "failed"})))
+          | map(select(.name != null and (.name | tostring | length) > 0))
+          | map(select((.name | tostring | ascii_downcase) != "package.xml"))
+          | sort_by(.type // "", .name // "")
+          | .[:500]
+          | .[]
+          | "| \(.name // "—") | \(.type // "—") | \(.mod) |"
+        ' resume-result.json 2>/dev/null || true)"
+
+        if [ -n "$component_rows" ]; then
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Component changes" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Component Name | Component Type | Modification |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| --- | --- | --- |" >> "$GITHUB_STEP_SUMMARY"
+          echo "$component_rows" >> "$GITHUB_STEP_SUMMARY"
+          total_int="${components_total:-0}"
+          if [ "${total_int:-0}" -gt 500 ] 2>/dev/null; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "_Showing first 500 of ${total_int} components._" >> "$GITHUB_STEP_SUMMARY"
+          fi
+        fi
+
+        test_failures_json="$(jq -c "${rt} | if type == \"object\" then (.failures // []) else empty end" resume-result.json 2>/dev/null || true)"
+        if [ -n "$test_failures_json" ] && [ "$test_failures_json" != "null" ] && [ "$test_failures_json" != "[]" ]; then
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Apex test failures" >> "$GITHUB_STEP_SUMMARY"
+          echo '```json' >> "$GITHUB_STEP_SUMMARY"
+          jq "${rt} | if type == \"object\" then .failures else empty end" resume-result.json >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+        fi
+
+        failures_json="$(jq -c '.result.details.componentFailures // empty' resume-result.json 2>/dev/null || true)"
+        if [ -n "$failures_json" ] && [ "$failures_json" != "null" ] && [ "$failures_json" != "[]" ]; then
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Component failures" >> "$GITHUB_STEP_SUMMARY"
+          echo '```json' >> "$GITHUB_STEP_SUMMARY"
+          jq '.result.details.componentFailures' resume-result.json >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+        fi
+
+        {
+          echo "deployment_id<<EOF"
+          echo "$deployment_id"
+          echo "EOF"
+          echo "deploy_status<<EOF"
+          echo "$deploy_status"
+          echo "EOF"
+          echo "tests_run<<EOF"
+          echo "$tests_run"
+          echo "EOF"
+          echo "tests_failed<<EOF"
+          echo "$tests_failed"
+          echo "EOF"
+          echo "apex_org_wide_coverage_percent<<EOF"
+          echo "$apex_org_wide_coverage_percent"
+          echo "EOF"
+        } >> "$GITHUB_OUTPUT"
+
+        exit "$resume_rc"
