@@ -47,6 +47,15 @@ outputs:
   deploy_status:
     description: "Deployment status reported by the CLI (e.g. Succeeded, Failed)."
     value: ${{ steps.deploy_resume.outputs.deploy_status }}
+  tests_run:
+    description: "Number of Apex tests run during deploy (empty if not present)."
+    value: ${{ steps.deploy_resume.outputs.tests_run }}
+  tests_failed:
+    description: "Number of Apex test failures (empty if not present)."
+    value: ${{ steps.deploy_resume.outputs.tests_failed }}
+  apex_org_wide_coverage_percent:
+    description: "Approximate org-wide line coverage percent from deploy codeCoverage rows (empty if not available)."
+    value: ${{ steps.deploy_resume.outputs.apex_org_wide_coverage_percent }}
 
 runs:
   using: "composite"
@@ -112,6 +121,27 @@ runs:
         num_failed="$(jq -r '.result.numberComponentErrors // empty' resume-result.json 2>/dev/null || true)"
         check_only="$(jq -r '.result.checkOnly // false' resume-result.json 2>/dev/null || true)"
 
+        rt='(.result.details.runTestResult // .result.runTestResult // empty)'
+
+        tests_run="$(jq -r "${rt} | if type == \"object\" then (.numTestsRun // empty | tostring) else empty end" resume-result.json 2>/dev/null || true)"
+        tests_failed="$(jq -r "${rt} | if type == \"object\" then (.numFailures // empty | tostring) else empty end" resume-result.json 2>/dev/null || true)"
+
+        apex_org_wide_coverage_percent="$(jq -r '
+          def n(v): (v // 0) | if type == "string" then tonumber else . end;
+          (.result.details.runTestResult // .result.runTestResult) as $rt |
+          if ($rt | type) != "object" then empty
+          else
+            ($rt.codeCoverage // empty) as $cc |
+            (if ($cc | type) == "array" then $cc elif $cc == null then [] else [$cc] end) as $rows |
+            if ($rows | length) == 0 then empty
+            else
+              ($rows | map(n(.numLocations)) | add // 0) as $tot |
+              ($rows | map(n(.numLocations) - n(.numLocationsNotCovered)) | add // 0) as $hit |
+              if ($tot | type) == "number" and $tot > 0 then (($hit / $tot * 10000 | round) / 100 | tostring) else empty end
+            end
+          end
+        ' resume-result.json 2>/dev/null || true)"
+
         {
           echo "## Deployment summary"
           echo ""
@@ -122,7 +152,19 @@ runs:
           [ -n "$num_deployed" ] && echo "| Components deployed | $num_deployed |"
           [ -n "$num_failed" ] && echo "| Component errors | $num_failed |"
           echo "| Check only (validate) | $check_only |"
+          [ -n "$tests_run" ] && echo "| Apex tests run | $tests_run |"
+          [ -n "$tests_failed" ] && echo "| Apex test failures | $tests_failed |"
+          [ -n "$apex_org_wide_coverage_percent" ] && echo "| Apex coverage (approx. org-wide) | ${apex_org_wide_coverage_percent}% |"
         } >> "$GITHUB_STEP_SUMMARY"
+
+        test_failures_json="$(jq -c "${rt} | if type == \"object\" then (.failures // []) else empty end" resume-result.json 2>/dev/null || true)"
+        if [ -n "$test_failures_json" ] && [ "$test_failures_json" != "null" ] && [ "$test_failures_json" != "[]" ]; then
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Apex test failures" >> "$GITHUB_STEP_SUMMARY"
+          echo '```json' >> "$GITHUB_STEP_SUMMARY"
+          jq "${rt} | if type == \"object\" then .failures else empty end" resume-result.json >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+        fi
 
         failures_json="$(jq -c '.result.details.componentFailures // empty' resume-result.json 2>/dev/null || true)"
         if [ -n "$failures_json" ] && [ "$failures_json" != "null" ] && [ "$failures_json" != "[]" ]; then
@@ -139,6 +181,15 @@ runs:
           echo "EOF"
           echo "deploy_status<<EOF"
           echo "$deploy_status"
+          echo "EOF"
+          echo "tests_run<<EOF"
+          echo "$tests_run"
+          echo "EOF"
+          echo "tests_failed<<EOF"
+          echo "$tests_failed"
+          echo "EOF"
+          echo "apex_org_wide_coverage_percent<<EOF"
+          echo "$apex_org_wide_coverage_percent"
           echo "EOF"
         } >> "$GITHUB_OUTPUT"
 

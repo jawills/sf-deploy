@@ -17,6 +17,7 @@ TEST_LEVEL:
     - RunSpecifiedTests
     - RunLocalTests
     - RunAllTestsInOrg
+    - RunRelevantTests
 WAIT:
   description: "Number of minutes to wait for command to complete and display results."
   type: number
@@ -42,10 +43,15 @@ DEPLOYMENT_ID:
 
 ## Outputs
 
-| Output           | Description                                        |
-| ---------------- | -------------------------------------------------- |
-| `deployment_id`  | Salesforce deployment job id.                      |
-| `deploy_status`  | Status from the CLI (e.g. `Succeeded`, `Failed`). |
+| Output                           | Description                                                                                                                                         |
+| -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `deployment_id`                  | Salesforce deployment job id.                                                                                                                       |
+| `deploy_status`                  | Status from the CLI (e.g. `Succeeded`, `Failed`).                                                                                                   |
+| `tests_run`                      | Apex tests run during deploy (empty if not in the CLI JSON).                                                                                        |
+| `tests_failed`                   | Apex test failures (empty if not in the CLI JSON).                                                                                                  |
+| `apex_org_wide_coverage_percent` | Approximate org-wide line coverage from deploy `codeCoverage` rows, e.g. `87.42` (empty if no coverage data—e.g. `NoTestRun` or CLI shape differs). |
+
+Coverage is derived from `runTestResult.codeCoverage` in the deploy result. It is a **lines-hit / lines-total** rollup across returned rows, not the same as every Salesforce UI metric.
 
 ## Delta deploys (e.g. SFDX-Git-Delta)
 
