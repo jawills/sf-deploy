@@ -157,6 +157,49 @@ runs:
           [ -n "$apex_org_wide_coverage_percent" ] && echo "| Apex coverage (approx. org-wide) | ${apex_org_wide_coverage_percent}% |"
         } >> "$GITHUB_STEP_SUMMARY"
 
+        components_total="$(jq -r '
+          def arr(x): if x == null then [] elif (x | type) == "array" then x elif x == {} then [] else [x] end;
+          (.result.details // {}) as $d |
+          (arr($d.componentSuccesses) | length) + (arr($d.componentFailures) | length)
+        ' resume-result.json 2>/dev/null)"
+        components_total="${components_total:-0}"
+
+        component_rows="$(jq -r '
+          def arr(x): if x == null then [] elif (x | type) == "array" then x elif x == {} then [] else [x] end;
+          def truthy(v): v == true or v == "true";
+          def mod(m):
+            if truthy(m.deleted) then "deleted"
+            elif truthy(m.created) then "created"
+            elif truthy(m.changed) then "change"
+            else "unchanged"
+            end;
+          (.result.details // {}) as $d |
+          (arr($d.componentSuccesses)) as $succ |
+          (arr($d.componentFailures)) as $fail |
+          (($succ | map({name: .fullName, type: .componentType, mod: mod(.)}))
+            + ($fail | map({name: .fullName, type: .componentType, mod: "failed"})))
+          | map(select(.name != null and (.name | tostring | length) > 0))
+          | map(select((.name | tostring | ascii_downcase) != "package.xml"))
+          | sort_by(.type // "", .name // "")
+          | .[:500]
+          | .[]
+          | "| \(.name // "—") | \(.type // "—") | \(.mod) |"
+        ' resume-result.json 2>/dev/null || true)"
+
+        if [ -n "$component_rows" ]; then
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Component changes" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Component Name | Component Type | Modification |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| --- | --- | --- |" >> "$GITHUB_STEP_SUMMARY"
+          echo "$component_rows" >> "$GITHUB_STEP_SUMMARY"
+          total_int="${components_total:-0}"
+          if [ "${total_int:-0}" -gt 500 ] 2>/dev/null; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "_Showing first 500 of ${total_int} components._" >> "$GITHUB_STEP_SUMMARY"
+          fi
+        fi
+
         test_failures_json="$(jq -c "${rt} | if type == \"object\" then (.failures // []) else empty end" resume-result.json 2>/dev/null || true)"
         if [ -n "$test_failures_json" ] && [ "$test_failures_json" != "null" ] && [ "$test_failures_json" != "[]" ]; then
           echo "" >> "$GITHUB_STEP_SUMMARY"

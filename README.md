@@ -1,6 +1,6 @@
 # Salesforce Deployment GitHub Actions
 
-Use this action to build a `package.xml` (or use your own) and deploy to a specified Salesforce environment. After deployment, it writes a **job summary** on the Actions run and exposes **outputs** for downstream steps.
+Use this action to build a `package.xml` (or use your own) and deploy to a specified Salesforce environment. After deployment, it writes a **job summary** on the Actions run (including metrics, **component changes**—name, type, and create/change/delete/unchanged/failed—and optional failure details) and exposes **outputs** for downstream steps.
 
 ## Inputs
 
@@ -52,6 +52,20 @@ DEPLOYMENT_ID:
 | `apex_org_wide_coverage_percent` | Approximate org-wide line coverage from deploy `codeCoverage` rows, e.g. `87.42` (empty if no coverage data—e.g. `NoTestRun` or CLI shape differs). |
 
 Coverage is derived from `runTestResult.codeCoverage` in the deploy result. It is a **lines-hit / lines-total** rollup across returned rows, not the same as every Salesforce UI metric.
+
+### Job summary: component changes
+
+The summary includes a **Component changes** table built from the deploy result’s `componentSuccesses` and `componentFailures`:
+
+| Modification | Meaning |
+| -------------- | -------- |
+| `created` | `created` on the DeployMessage (new in org). |
+| `change` | `changed` (updated). |
+| `deleted` | `deleted`. |
+| `unchanged` | Deployed but same as org (`created`/`changed`/`deleted` all false). |
+| `failed` | Row from `componentFailures`. |
+
+The manifest artifact row `package.xml` is omitted. Large deploys list at most **500** rows, with a note if more exist.
 
 ## Delta deploys (e.g. SFDX-Git-Delta)
 
